@@ -56,8 +56,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
+                        # Set to inference mode for validation
+                        if hasattr(self.model, 'set_teacher_forcing_mode'):
+                            self.model.set_teacher_forcing_mode(False)
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
+                    # Set to inference mode for validation
+                    if hasattr(self.model, 'set_teacher_forcing_mode'):
+                        self.model.set_teacher_forcing_mode(False)
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -114,6 +120,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
+                        # Check if model supports teacher forcing mode
+                        if hasattr(self.model, 'set_teacher_forcing_mode'):
+                            self.model.set_teacher_forcing_mode(True)
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                         f_dim = -1 if self.args.features == 'MS' else 0
@@ -122,6 +131,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
+                    # Check if model supports teacher forcing mode
+                    if hasattr(self.model, 'set_teacher_forcing_mode'):
+                        self.model.set_teacher_forcing_mode(True)
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
@@ -192,8 +204,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
+                        # Set to inference mode for testing
+                        if hasattr(self.model, 'set_teacher_forcing_mode'):
+                            self.model.set_teacher_forcing_mode(False)
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
+                    # Set to inference mode for testing
+                    if hasattr(self.model, 'set_teacher_forcing_mode'):
+                        self.model.set_teacher_forcing_mode(False)
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
