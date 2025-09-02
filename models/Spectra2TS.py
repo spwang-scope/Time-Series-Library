@@ -213,7 +213,7 @@ class MultiHeadAttention(nn.Module):
     
     def __init__(self, embed_dim, num_heads, dropout=0.1):
         super().__init__()
-        assert embed_dim % num_heads == 0
+        assert embed_dim % num_heads == 0, (f"embed_dim = {embed_dim} should be divisible by num_heads = {num_heads}")
         
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -723,7 +723,7 @@ class Model(nn.Module):
             in_channels=self.num_channels,
             embed_dim=768,
             depth=3,
-            num_heads=10,
+            num_heads=12,
             mlp_ratio=4,
             dropout=0.1
         )
