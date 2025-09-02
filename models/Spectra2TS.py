@@ -611,7 +611,18 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         target: Optional[torch.Tensor] = None,
         use_teacher_forcing: bool = True
     ) -> torch.Tensor:
-        """Forward pass with optional teacher forcing."""
+        """
+        Forward pass with optional teacher forcing.
+        
+        Args:
+            encoder_output: Output from ViT encoder (batch_size, num_patches+1, encoder_dim)
+            context_condition: Last feature column of context (batch_size, context_length)
+            target: Ground truth for teacher forcing (batch_size, prediction_length, time_series_dim)
+            use_teacher_forcing: Whether to use teacher forcing (True during training)
+            
+        Returns:
+            Predictions (batch_size, prediction_length, time_series_dim)
+        """
         batch_size = encoder_output.size(0)
         device = encoder_output.device
         
@@ -627,6 +638,9 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         
         if use_teacher_forcing and target is not None:
             # Teacher forcing: use ground truth as input, properly aligned for prediction
+            # Input: [start_token, target[0], target[1], ..., target[n-2]]
+            # Output: [target[0], target[1], target[2], ..., target[n-1]]
+
             start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
             # Use target[:-1] (all but last element) to predict target (all elements)
             decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
@@ -744,20 +758,12 @@ class Model(nn.Module):
             time_series_dim=self.time_series_dim,
             encoder_dim=self.feature_projection_dim,  # After linear projection
         )
-        
-        # Classification head for classification task
-        if self.task_name == 'classification':
-            self.num_class = getattr(configs, 'num_class', 2)  # Default binary classification
-            self.act = F.gelu
-            self.dropout_cls = nn.Dropout(configs.dropout)
-            self.projection = nn.Linear(
-                self.ts_model_dim * self.seq_len, self.num_class)
 
     def set_teacher_forcing_mode(self, use_teacher_forcing: bool):
         """Set teacher forcing mode (called by TSLib framework)"""
         self.use_teacher_forcing = use_teacher_forcing
 
-    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, tf_target=None):
         """Long-term forecasting using ViT encoder and Transformer decoder."""
         device = next(self.parameters()).device
         batch_size = x_enc.size(0)
@@ -780,17 +786,17 @@ class Model(nn.Module):
         
         # Step 4: Process through decoder with teacher forcing control
         if self.use_teacher_forcing:
-            # Extract target from decoder input for teacher forcing
-            # x_dec contains [context_tail + zeros], we need actual target
-            # In TSLib, the ground truth target should be derived from the batch
-            # For teacher forcing, we extract the target sequence from x_dec
-            # x_dec format: [B, label_len + pred_len, features]
-            target_sequence = x_dec[:, -self.pred_len:, -1:].to(device)  # Use last feature as target
+            # Teacher forcing: prepare target features
+            if tf_target is not None:
+                # Single variable: use last feature only
+                target_features = tf_target[:, :, -1:]  # (batch, pred_len, 1)
+            else:
+                raise ValueError("tf_target must be provided in training mode")
             
             predictions = self.ts_decoder(
                 encoder_output=encoder_features,
                 context_condition=context_condition,
-                target=target_sequence,
+                target=target_features,
                 use_teacher_forcing=True
             )
         else:
@@ -804,43 +810,7 @@ class Model(nn.Module):
         
         return predictions
 
-    def classification(self, x_enc, x_mark_enc):
-        """Classification using ViT encoder features."""
-        device = next(self.parameters()).device
-        batch_size = x_enc.size(0)
-        
-        # Generate spectrograms from input context
-        spectra_list = []
-        for item in x_enc:
-            spectra = get_STFT_spectra(item, device=device)
-            spectra_list.append(spectra)
-        
-        # Stack into batch tensor
-        spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, 128, 128)
-        
-        # Process through ViT encoder
-        vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
-        encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, feature_projection_dim)
-        
-        # Use CLS token for classification
-        cls_features = encoder_features[:, 0, :]  # (batch, feature_projection_dim)
-        
-        # Project to time series decoder dimension for consistency
-        cls_projected = nn.Linear(self.feature_projection_dim, self.ts_model_dim).to(device)(cls_features)
-        
-        # Expand to sequence length for compatibility
-        cls_sequence = cls_projected.unsqueeze(1).expand(-1, self.seq_len, -1)  # (batch, seq_len, ts_model_dim)
-        
-        # Apply classification head
-        output = self.act(cls_sequence)
-        output = self.dropout_cls(output)
-        # Flatten for classification
-        output = output.reshape(output.shape[0], -1)  # (batch, seq_len * ts_model_dim)
-        output = self.projection(output)  # (batch, num_class)
-        
-        return output
-
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, tf_target):
         """
         TSLib compatible forward method.
         
@@ -856,12 +826,7 @@ class Model(nn.Module):
         """
         
         if self.task_name == 'long_term_forecast':
-            dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+            dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, tf_target)
             return dec_out  # [B, pred_len, 1] - univariate output (last feature)
-            
-        elif self.task_name == 'classification':
-            dec_out = self.classification(x_enc, x_mark_enc)
-            return dec_out  # [B, num_class]
-            
         else:
             raise ValueError(f"Task {self.task_name} not supported. Only 'long_term_forecast' and 'classification' are supported.")

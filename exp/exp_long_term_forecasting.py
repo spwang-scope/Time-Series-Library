@@ -59,12 +59,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         # Set to inference mode for validation
                         if hasattr(self.model, 'set_teacher_forcing_mode'):
                             self.model.set_teacher_forcing_mode(False)
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
                 else:
                     # Set to inference mode for validation
                     if hasattr(self.model, 'set_teacher_forcing_mode'):
                         self.model.set_teacher_forcing_mode(False)
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -123,7 +123,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         # Check if model supports teacher forcing mode
                         if hasattr(self.model, 'set_teacher_forcing_mode'):
                             self.model.set_teacher_forcing_mode(True)
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=batch_y)
 
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -134,7 +134,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     # Check if model supports teacher forcing mode
                     if hasattr(self.model, 'set_teacher_forcing_mode'):
                         self.model.set_teacher_forcing_mode(True)
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=batch_y)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -207,12 +207,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         # Set to inference mode for testing
                         if hasattr(self.model, 'set_teacher_forcing_mode'):
                             self.model.set_teacher_forcing_mode(False)
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
                 else:
                     # Set to inference mode for testing
                     if hasattr(self.model, 'set_teacher_forcing_mode'):
                         self.model.set_teacher_forcing_mode(False)
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, :]
