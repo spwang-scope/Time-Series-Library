@@ -9,7 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
 #from data_provider.m4 import M4Dataset, M4Meta
 from data_provider.uea import subsample, interpolate_missing, Normalizer
-from sktime.datasets import load_from_tsfile_to_dataframe
+#from sktime.datasets import load_from_tsfile_to_dataframe
 import warnings
 from utils.augmentation import run_augmentation_single
 from typing import Optional
@@ -619,7 +619,7 @@ class SWATSegLoader(Dataset):
                               index // self.step * self.win_size:index // self.step * self.win_size + self.win_size]), np.float32(
                 self.test_labels[index // self.step * self.win_size:index // self.step * self.win_size + self.win_size])
 
-
+'''
 class UEAloader(Dataset):
     """
     Dataset class for datasets included in:
@@ -753,3 +753,5 @@ class UEAloader(Dataset):
 
     def __len__(self):
         return len(self.all_IDs)
+'''
+
