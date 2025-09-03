@@ -11,13 +11,16 @@ import warnings
 import numpy as np
 from utils.dtw_metric import dtw, accelerated_dtw
 from utils.augmentation import run_augmentation, run_augmentation_single
-
+from datetime import datetime
+import pickle
 warnings.filterwarnings('ignore')
 
 
 class Exp_Long_Term_Forecast(Exp_Basic):
     def __init__(self, args):
         super(Exp_Long_Term_Forecast, self).__init__(args)
+        self.path = None
+        self._scaler = None
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -27,7 +30,27 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return model
 
     def _get_data(self, flag):
-        data_set, data_loader = data_provider(self.args, flag)
+        scaler_savepath = os.path.join(self.path, 'scaler.save')
+        if flag == 'train':
+            data_set, data_loader = data_provider(self.args, flag)
+            self._scaler = data_set.scaler
+            f = open(scaler_savepath, 'wb')
+            pickle.dump(self._scaler, f)
+            f.close()
+            print("scaler saved to {}".format(scaler_savepath))
+        else:
+            #print('flag is not train, loading scaler from {}'.format(scaler_savepath))
+            print('loading scaler from {}'.format(scaler_savepath))
+            f = open(scaler_savepath, 'rb')
+            self._scaler = pickle.load(f)
+            f.close()
+            #print(self._scaler.mean_)
+            #print(self._scaler.scale_)
+            #print('scaler loaded')
+
+            data_set, data_loader = data_provider(self.args, flag, self._scaler)
+            data_set.scaler = self._scaler
+            print('replaced scaler with loaded scaler')
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -80,13 +103,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return total_loss
 
     def train(self, setting):
+        
+
+        path = os.path.join(self.args.checkpoints, setting)
+        self.path = path
+        if not os.path.exists(path):
+            os.makedirs(path)
+        
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
-
-        path = os.path.join(self.args.checkpoints, setting)
-        if not os.path.exists(path):
-            os.makedirs(path)
 
         time_now = time.time()
 
@@ -178,7 +204,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return self.model
 
     def test(self, setting, test=0):
-        test_data, test_loader = self._get_data(flag='test')
+        if test==1:
+            self.path = os.path.join(self.args.checkpoints, setting)
+            test_data, test_loader = self._get_data(flag='test')
         if test:
             print('loading model')
             self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))

@@ -12,6 +12,7 @@ from data_provider.uea import subsample, interpolate_missing, Normalizer
 from sktime.datasets import load_from_tsfile_to_dataframe
 import warnings
 from utils.augmentation import run_augmentation_single
+from typing import Optional
 
 warnings.filterwarnings('ignore')
 
@@ -207,7 +208,7 @@ class Dataset_ETT_minute(Dataset):
 class Dataset_Custom(Dataset):
     def __init__(self, args, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
+                 target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None, loaded_scaler: Optional[object] = None):
         # size [seq_len, label_len, pred_len]
         self.args = args
         # info
@@ -229,13 +230,15 @@ class Dataset_Custom(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
+        self.loaded_scaler = loaded_scaler
+        self.flag = flag
 
         self.root_path = root_path
         self.data_path = data_path
         self.__read_data__()
 
     def __read_data__(self):
-        self.scaler = StandardScaler()
+        self.scaler = None
         df_raw = pd.read_csv(os.path.join(self.root_path,
                                           self.data_path))
 
@@ -260,12 +263,16 @@ class Dataset_Custom(Dataset):
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
 
-        if self.scale:
+        if self.scale and self.flag != 'train':
+
+            self.scaler = self.loaded_scaler
+            data = self.scaler.transform(df_data.values)
+            data = df_data.values
+        elif self.scale and self.flag == 'train':
             train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler = StandardScaler()
             self.scaler.fit(train_data.values)
             data = self.scaler.transform(df_data.values)
-        else:
-            data = df_data.values
 
         df_stamp = df_raw[['date']][border1:border2]
         df_stamp['date'] = pd.to_datetime(df_stamp.date)
