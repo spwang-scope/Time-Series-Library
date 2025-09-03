@@ -1,5 +1,3 @@
-export CUDA_VISIBLE_DEVICES=1
-
 model_name=Spectra2TS
 
 python -u run.py \
@@ -24,7 +22,7 @@ python -u run.py \
   --dropout 0.1 \
   --des 'Exp' \
   --itr 1 \
-  --train_epochs 20 \
+  --train_epochs 50 \
   --batch_size 32 \
   --learning_rate 1e-4
 
@@ -50,7 +48,7 @@ python -u run.py \
   --dropout 0.1 \
   --des 'Exp' \
   --itr 1 \
-  --train_epochs 20 \
+  --train_epochs 50 \
   --batch_size 32 \
   --learning_rate 1e-4
 
@@ -76,7 +74,7 @@ python -u run.py \
   --dropout 0.1 \
   --des 'Exp' \
   --itr 1 \
-  --train_epochs 20 \
+  --train_epochs 50 \
   --batch_size 32 \
   --learning_rate 1e-4
 
@@ -102,6 +100,6 @@ python -u run.py \
   --dropout 0.1 \
   --des 'Exp' \
   --itr 1 \
-  --train_epochs 20 \
+  --train_epochs 50 \
   --batch_size 32 \
   --learning_rate 1e-4
