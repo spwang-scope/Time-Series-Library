@@ -263,15 +263,19 @@ class Dataset_Custom(Dataset):
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
 
-        if self.scale and self.flag != 'train':
-
-            self.scaler = self.loaded_scaler
-            data = self.scaler.transform(df_data.values)
-            data = df_data.values
-        elif self.scale and self.flag == 'train':
+        if self.flag == 'train':
             train_data = df_data[border1s[0]:border2s[0]]
             self.scaler = StandardScaler()
             self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        elif self.flag != 'train' and self.loaded_scaler is not None:
+            self.scaler = self.loaded_scaler
+            data = self.scaler.transform(df_data.values)
+            data = df_data.values
+        else:   # test without loaded scaler means standalone test
+            self.scaler = StandardScaler()
+            test_data = df_data[border1s[2]:border2s[2]]
+            self.scaler.fit(test_data.values)
             data = self.scaler.transform(df_data.values)
 
         df_stamp = df_raw[['date']][border1:border2]

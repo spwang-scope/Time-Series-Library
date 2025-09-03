@@ -29,7 +29,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
 
-    def _get_data(self, flag):
+    def _get_data(self, flag, standalone_test=False):
         scaler_savepath = os.path.join(self.path, 'scaler.save')
         if flag == 'train':
             data_set, data_loader = data_provider(self.args, flag)
@@ -38,19 +38,17 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             pickle.dump(self._scaler, f)
             f.close()
             print("scaler saved to {}".format(scaler_savepath))
-        else:
-            #print('flag is not train, loading scaler from {}'.format(scaler_savepath))
+        elif flag != 'train' and standalone_test is False:
+
             print('loading scaler from {}'.format(scaler_savepath))
             f = open(scaler_savepath, 'rb')
             self._scaler = pickle.load(f)
             f.close()
-            #print(self._scaler.mean_)
-            #print(self._scaler.scale_)
-            #print('scaler loaded')
-
             data_set, data_loader = data_provider(self.args, flag, self._scaler)
-            data_set.scaler = self._scaler
             print('replaced scaler with loaded scaler')
+        else:   # standalone test
+            data_set, data_loader = data_provider(self.args, flag)
+            print('standalone test uses its own scaler')
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -123,7 +121,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         criterion = self._select_criterion()
 
         if self.args.use_amp:
-            scaler = torch.cuda.amp.GradScaler()
+            ampscaler = torch.cuda.amp.GradScaler()
 
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -177,9 +175,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     time_now = time.time()
 
                 if self.args.use_amp:
-                    scaler.scale(loss).backward()
-                    scaler.step(model_optim)
-                    scaler.update()
+                    ampscaler.scale(loss).backward()
+                    ampscaler.step(model_optim)
+                    ampscaler.update()
                 else:
                     loss.backward()
                     model_optim.step()
@@ -206,9 +204,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def test(self, setting, test=0):
         if test==1:
             self.path = os.path.join(self.args.checkpoints, setting)
-            test_data, test_loader = self._get_data(flag='test')
-        if test:
-            print('loading model')
+            test_data, test_loader = self._get_data(flag='test', standalone_test=True)
+            print('(standalone testing) loading model...')
             self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
 
         preds = []
