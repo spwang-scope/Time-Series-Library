@@ -271,7 +271,6 @@ class Dataset_Custom(Dataset):
         elif self.flag != 'train' and self.loaded_scaler is not None:
             self.scaler = self.loaded_scaler
             data = self.scaler.transform(df_data.values)
-            data = df_data.values
         else:   
             raise ValueError("Scaler is None. Please provide a loaded_scaler for validation or test set.")
 

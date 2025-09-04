@@ -170,3 +170,4 @@ environment.txt
 *.err
 *.out
 *.txt
+.sh
