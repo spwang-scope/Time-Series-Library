@@ -272,11 +272,8 @@ class Dataset_Custom(Dataset):
             self.scaler = self.loaded_scaler
             data = self.scaler.transform(df_data.values)
             data = df_data.values
-        else:   # test without loaded scaler means standalone test
-            self.scaler = StandardScaler()
-            test_data = df_data[border1s[2]:border2s[2]]
-            self.scaler.fit(test_data.values)
-            data = self.scaler.transform(df_data.values)
+        else:   
+            raise ValueError("Scaler is None. Please provide a loaded_scaler for validation or test set.")
 
         df_stamp = df_raw[['date']][border1:border2]
         df_stamp['date'] = pd.to_datetime(df_stamp.date)

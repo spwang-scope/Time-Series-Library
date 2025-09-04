@@ -38,17 +38,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             pickle.dump(self._scaler, f)
             f.close()
             print("scaler saved to {}".format(scaler_savepath))
-        elif flag != 'train' and standalone_test is False:
-
-            print('loading scaler from {}'.format(scaler_savepath))
+        elif flag != 'train':
             f = open(scaler_savepath, 'rb')
             self._scaler = pickle.load(f)
             f.close()
             data_set, data_loader = data_provider(self.args, flag, self._scaler)
             print('replaced scaler with loaded scaler')
-        else:   # standalone test
-            data_set, data_loader = data_provider(self.args, flag)
-            print('standalone test uses its own scaler')
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -202,10 +197,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return self.model
 
     def test(self, setting, test=0):
+
+        self.path = os.path.join(self.args.checkpoints, setting)
+        test_data, test_loader = self._get_data(flag='test', standalone_test=True)
+        print('(standalone testing) loading model...')
         if test==1:
-            self.path = os.path.join(self.args.checkpoints, setting)
-            test_data, test_loader = self._get_data(flag='test', standalone_test=True)
-            print('(standalone testing) loading model...')
             self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
 
         preds = []
