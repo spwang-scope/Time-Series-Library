@@ -66,24 +66,22 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+                f_dim = -1 if self.args.features == 'MS' else 0
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         # Set to inference mode for validation
                         if hasattr(self.model, 'set_teacher_forcing_mode'):
                             self.model.set_teacher_forcing_mode(False)
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
+                        outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=None)
                 else:
                     # Set to inference mode for validation
                     if hasattr(self.model, 'set_teacher_forcing_mode'):
                         self.model.set_teacher_forcing_mode(False)
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=None)
+                
 
                 pred = outputs.detach()
                 true = batch_y.detach()
@@ -132,32 +130,22 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-
+                f_dim = -1 if self.args.features == 'MS' else 0
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         # Check if model supports teacher forcing mode
                         if hasattr(self.model, 'set_teacher_forcing_mode'):
                             self.model.set_teacher_forcing_mode(True)
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=batch_y)
-
-                        f_dim = -1 if self.args.features == 'MS' else 0
-                        outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                        outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=batch_y)
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
                     # Check if model supports teacher forcing mode
                     if hasattr(self.model, 'set_teacher_forcing_mode'):
                         self.model.set_teacher_forcing_mode(True)
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=batch_y)
-
-                    f_dim = -1 if self.args.features == 'MS' else 0
-                    outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=batch_y)
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
 
@@ -206,6 +194,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = []
         trues = []
+        test_loss = []
         folder_path = './test_results/' + setting + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -218,26 +207,24 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
-
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+                
+                f_dim = -1 if self.args.features == 'MS' else 0
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         # Set to inference mode for testing
                         if hasattr(self.model, 'set_teacher_forcing_mode'):
                             self.model.set_teacher_forcing_mode(False)
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
+                        outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=None)
                 else:
                     # Set to inference mode for testing
                     if hasattr(self.model, 'set_teacher_forcing_mode'):
                         self.model.set_teacher_forcing_mode(False)
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, tf_target=None)
+                    outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=None)
 
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, :]
-                batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
+                loss = self._select_criterion()(outputs, batch_y)
+                
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
@@ -263,6 +250,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
                     pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
                     visual(gt, pd, os.path.join(folder_path, str(i) + '.pdf'))
+
+                test_loss.append(loss.item())
+        avg_loss = np.average(test_loss)
+        print('test batch avg loss: {:.7f}'.format(avg_loss))
 
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)

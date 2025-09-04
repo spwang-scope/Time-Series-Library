@@ -1,5 +1,3 @@
-export CUDA_VISIBLE_DEVICES=1
-
 model_name=Spectra2TS
 
 python -u run.py \
