@@ -339,16 +339,16 @@ class RectangularViT(nn.Module):
         
     def _init_weights(self):
         """Initialize weights."""
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.04)
         
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.trunc_normal_(module.weight, std=0.02)
+                nn.init.trunc_normal_(module.weight, std=0.04)
                 if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+                    nn.init.trunc_normal_(module.bias, std=0.04)
             elif isinstance(module, nn.LayerNorm):
                 nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
+                nn.init.trunc_normal_(module.bias, std=0.04)
                 
     def get_last_hidden_state(self, x):
         """Get the last hidden state (all tokens) from the transformer."""
@@ -581,11 +581,11 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         
         # Initialize value embedding layer
         nn.init.xavier_uniform_(self.value_embedding.weight)
-        nn.init.constant_(self.value_embedding.bias, 0.0)
+        nn.init.constant_(self.value_embedding.bias, 0.1)
         
         # Initialize encoder projection
         nn.init.xavier_uniform_(self.encoder_projection.weight)
-        nn.init.constant_(self.encoder_projection.bias, 0.0)
+        nn.init.constant_(self.encoder_projection.bias, 0.1)
         
         # Initialize output projection with smaller weights for stable training
         for i, layer in enumerate(self.output_projection):
@@ -596,7 +596,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                     nn.init.constant_(layer.bias, 0.1)
                 else:
                     nn.init.xavier_uniform_(layer.weight)
-                    nn.init.constant_(layer.bias, 0.0)
+                    nn.init.constant_(layer.bias, 0.1)
         
     def _generate_square_subsequent_mask(self, sz: int, device: torch.device) -> torch.Tensor:
         """Generate causal mask for autoregressive generation."""
