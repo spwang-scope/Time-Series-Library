@@ -29,7 +29,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
 
-    def _get_data(self, flag, standalone_test=False):
+    def _get_data(self, flag):
         scaler_savepath = os.path.join(self.path, 'scaler.save')
         if flag == 'train':
             data_set, data_loader = data_provider(self.args, flag)
@@ -187,10 +187,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def test(self, setting, test=0):
 
         self.path = os.path.join(self.args.checkpoints, setting)
-        test_data, test_loader = self._get_data(flag='test', standalone_test=True)
+        test_data, test_loader = self._get_data(flag='test')
         print('(standalone testing) loading model...')
         if test==1:
             self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
+            print(self.model)
 
         preds = []
         trues = []

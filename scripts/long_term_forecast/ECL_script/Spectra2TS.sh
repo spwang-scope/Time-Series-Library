@@ -10,7 +10,7 @@ python -u run.py \
   --data custom \
   --features MS \
   --seq_len 96 \
-  --label_len 48 \
+  --label_len 0 \
   --pred_len 96 \
   --enc_in 321 \
   --dec_in 321 \
@@ -36,7 +36,7 @@ python -u run.py \
   --data custom \
   --features MS \
   --seq_len 96 \
-  --label_len 48 \
+  --label_len 0 \
   --pred_len 192 \
   --enc_in 321 \
   --dec_in 321 \
@@ -62,7 +62,7 @@ python -u run.py \
   --data custom \
   --features MS \
   --seq_len 96 \
-  --label_len 48 \
+  --label_len 0 \
   --pred_len 336 \
   --enc_in 321 \
   --dec_in 321 \
@@ -88,7 +88,7 @@ python -u run.py \
   --data custom \
   --features MS \
   --seq_len 96 \
-  --label_len 48 \
+  --label_len 0 \
   --pred_len 720 \
   --enc_in 321 \
   --dec_in 321 \
