@@ -598,7 +598,6 @@ class TransformerDecoderLayer(nn.Module):
         tgt: torch.Tensor,                    # Query [batch, seq_len, d_model] (seq_len=1 for inference, >1 for teacher forcing)
         encoder_memory: torch.Tensor,         # Static encoder K,V [batch, 258, d_model]  
         decoder_kv_cache: Optional[torch.Tensor] = None,  # Cached decoder K,V (None for teacher forcing)
-        tgt_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Returns:
@@ -750,15 +749,11 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len, d_model)
             decoder_input = self.pos_encoding(decoder_input)
             
-            # Create causal mask
-            tgt_len = decoder_input.size(1)
-            tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
-            
             # Pass through decoder layers (teacher forcing mode - process entire sequence)
             output = decoder_input
             for layer in self.decoder_layers:
                 # For teacher forcing, we don't use KV-caching, just pass None for decoder_kv_cache
-                output, _ = layer(output, encoder_memory, decoder_kv_cache=None, tgt_mask=tgt_mask)
+                output, _ = layer(output, encoder_memory, decoder_kv_cache=None)
             
             # Project to output dimension - now directly predicts target
             output = self.output_projection(output)  # (batch_size, pred_len, ts_dim)
@@ -781,7 +776,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 new_kvs = []
                 
                 for layer in self.decoder_layers:
-                    step_output, new_kv = layer(step_output, encoder_memory, decoder_kv_cache, tgt_mask=None)
+                    step_output, new_kv = layer(step_output, encoder_memory, decoder_kv_cache)
                     new_kvs.append(new_kv)
                 
                 # Update KV cache with new values (use the step_output for next iteration)
