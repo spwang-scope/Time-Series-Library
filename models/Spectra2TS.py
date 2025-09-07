@@ -456,6 +456,110 @@ class DecoderPositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class KVCacheCrossAttention(nn.Module):
+    """Cross-attention with KV-caching for efficient autoregressive decoding."""
+    
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % nhead == 0, f"d_model {d_model} must be divisible by nhead {nhead}"
+        
+        self.d_model = d_model
+        self.nhead = nhead
+        self.d_head = d_model // nhead
+        self.scale = self.d_head ** -0.5
+        
+        # Separate linear projections for Q, K, V (like CATS)
+        self.W_Q = nn.Linear(d_model, d_model, bias=False)
+        self.W_K = nn.Linear(d_model, d_model, bias=False)
+        self.W_V = nn.Linear(d_model, d_model, bias=False)
+        
+        # Output projection
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(
+        self,
+        query: torch.Tensor,           # Query: [batch, seq_len, d_model] (seq_len=1 for inference, >1 for teacher forcing)
+        encoder_kv: torch.Tensor,      # Static encoder K,V [batch, 258, d_model]
+        decoder_kv_cache: Optional[torch.Tensor] = None,  # Cached decoder K,V [batch, steps, d_model] (None for teacher forcing)
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Args:
+            query: Query tensor [batch, seq_len, d_model] (seq_len=1 for inference, pred_len for teacher forcing)
+            encoder_kv: Static encoder memory [batch, 258, d_model] 
+            decoder_kv_cache: Accumulated decoder K,V [batch, current_steps, d_model] (None for teacher forcing)
+            
+        Returns:
+            output: Attention output [batch, seq_len, d_model]
+            new_kv: New K,V to add to cache [batch, 1, d_model] for inference, None for teacher forcing
+        """
+        batch_size, seq_len, _ = query.shape
+        
+        # Project queries
+        q = self.W_Q(query)  # [batch, seq_len, d_model]
+        q = q.view(batch_size, seq_len, self.nhead, self.d_head)  # [batch, seq_len, nhead, d_head]
+        q = q.transpose(1, 2)  # [batch, nhead, seq_len, d_head]
+        
+        # Project encoder K,V (static, computed once)
+        encoder_k = self.W_K(encoder_kv)  # [batch, 258, d_model]
+        encoder_v = self.W_V(encoder_kv)  # [batch, 258, d_model]
+        
+        encoder_k = encoder_k.view(batch_size, -1, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, 258, d_head]
+        encoder_v = encoder_v.view(batch_size, -1, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, 258, d_head]
+        
+        if decoder_kv_cache is None:
+            # Teacher forcing mode: use encoder K,V + query K,V
+            query_k = self.W_K(query)  # [batch, seq_len, d_model]
+            query_v = self.W_V(query)  # [batch, seq_len, d_model]
+            
+            query_k = query_k.view(batch_size, seq_len, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, seq_len, d_head]
+            query_v = query_v.view(batch_size, seq_len, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, seq_len, d_head]
+            
+            # Concatenate: encoder + current sequence
+            k = torch.cat([encoder_k, query_k], dim=2)  # [batch, nhead, 258+seq_len, d_head]
+            v = torch.cat([encoder_v, query_v], dim=2)  # [batch, nhead, 258+seq_len, d_head]
+            
+            new_kv = None  # No caching in teacher forcing mode
+        else:
+            # Inference mode: KV-caching (seq_len should be 1)
+            assert seq_len == 1, f"In inference mode, seq_len should be 1, got {seq_len}"
+            
+            # Project current query to get new K,V for decoder cache
+            new_k = self.W_K(query)  # [batch, 1, d_model]
+            new_v = self.W_V(query)  # [batch, 1, d_model]
+            
+            new_k_reshaped = new_k.view(batch_size, 1, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, 1, d_head]
+            new_v_reshaped = new_v.view(batch_size, 1, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, 1, d_head]
+            
+            # Project cached decoder K,V
+            cached_k = self.W_K(decoder_kv_cache)  # [batch, steps, d_model]
+            cached_v = self.W_V(decoder_kv_cache)  # [batch, steps, d_model]
+            
+            cached_k = cached_k.view(batch_size, -1, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, steps, d_head]
+            cached_v = cached_v.view(batch_size, -1, self.nhead, self.d_head).transpose(1, 2)  # [batch, nhead, steps, d_head]
+            
+            # Concatenate: encoder + cached_decoder + new
+            k = torch.cat([encoder_k, cached_k, new_k_reshaped], dim=2)  # [batch, nhead, 258+steps+1, d_head]
+            v = torch.cat([encoder_v, cached_v, new_v_reshaped], dim=2)  # [batch, nhead, 258+steps+1, d_head]
+            
+            new_kv = query  # Cache the original query for next step
+        
+        # Compute attention scores
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [batch, nhead, seq_len, total_len]
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)  # [batch, nhead, seq_len, d_head]
+        
+        # Reshape and project output
+        attn_output = attn_output.transpose(1, 2).contiguous()  # [batch, seq_len, nhead, d_head]
+        attn_output = attn_output.view(batch_size, seq_len, self.d_model)  # [batch, seq_len, d_model]
+        output = self.out_proj(attn_output)
+        
+        return output, new_kv
+
+
 class TransformerDecoderLayer(nn.Module):
     """Custom transformer decoder layer with self-attention and cross-attention."""
     
@@ -474,8 +578,8 @@ class TransformerDecoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         
-        # Cross-attention
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        # Cross-attention with KV-caching
+        self.cross_attn = KVCacheCrossAttention(d_model, nhead, dropout)
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout2 = nn.Dropout(dropout)
         
@@ -491,18 +595,23 @@ class TransformerDecoderLayer(nn.Module):
         
     def forward(
         self,
-        tgt: torch.Tensor,
-        memory: torch.Tensor,
+        tgt: torch.Tensor,                    # Query [batch, seq_len, d_model] (seq_len=1 for inference, >1 for teacher forcing)
+        encoder_memory: torch.Tensor,         # Static encoder K,V [batch, 258, d_model]  
+        decoder_kv_cache: Optional[torch.Tensor] = None,  # Cached decoder K,V (None for teacher forcing)
         tgt_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Returns:
+            output: Layer output [batch, seq_len, d_model]
+            new_kv: New K,V to add to cache [batch, 1, d_model] for inference, None for teacher forcing
+        """
         # Self-attention with residual connection
         tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
         
-        # Cross-attention with residual connection
-        # Q from decoder (tgt), K and V from encoder (memory)
-        tgt2 = self.cross_attn(tgt, memory, memory)[0]
+        # KV-cached cross-attention
+        tgt2, new_kv = self.cross_attn(tgt, encoder_memory, decoder_kv_cache)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
         
@@ -511,7 +620,7 @@ class TransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
         
-        return tgt
+        return tgt, new_kv
 
 
 class TransformerDecoderWithCrossAttention(nn.Module):
@@ -545,8 +654,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
         
-        # Project context condition (last feature of context) to decoder dimension
-        self.context_condition_projection = nn.Linear(context_length, d_model)
         
         # Custom transformer decoder layers with cross-attention
         self.decoder_layers = nn.ModuleList([
@@ -568,16 +675,15 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             nn.Linear(d_model // 2, time_series_dim)
         )
         
-        # Learnable start token
-        self.start_token = nn.Parameter(torch.randn(1, 1, time_series_dim))
+        # Project context condition to time series dimension for start token
+        self.context_to_start_token = nn.Linear(d_model, time_series_dim)
+        
         
         # Initialize parameters
         self._initialize_parameters()
     
     def _initialize_parameters(self):
         """Initialize decoder parameters with better schemes for gradient sensitivity."""
-        # Initialize start token with small values close to expected range
-        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
         
         # Initialize value embedding layer
         nn.init.xavier_uniform_(self.value_embedding.weight)
@@ -598,11 +704,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                     nn.init.xavier_uniform_(layer.weight)
                     nn.init.constant_(layer.bias, 0.1)
         
-    def _generate_square_subsequent_mask(self, sz: int, device: torch.device) -> torch.Tensor:
-        """Generate causal mask for autoregressive generation."""
-        mask = torch.triu(torch.ones(sz, sz, device=device), diagonal=1)
-        mask = mask.masked_fill(mask == 1, float('-inf'))
-        return mask
     
     def forward(
         self, 
@@ -629,19 +730,19 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Project encoder output for cross-attention K, V
         memory = self.encoder_projection(encoder_output)  # (batch_size, num_patches+1, d_model)
         
-        # Project context condition and add to memory as additional context
-        context_vec = self.context_condition_projection(context_condition)  # (batch_size, d_model)
-        context_vec = context_vec.unsqueeze(1)  # (batch_size, 1, d_model)
+        print("context_condition shape:", context_condition.shape)  # Debugging line
+        # Use context condition directly (already has correct shape and dimension)
         
         # Combine encoder output with context condition for cross-attention
-        memory = torch.cat([memory, context_vec], dim=1)  # (batch_size, num_patches+2, d_model)
+        encoder_memory = torch.cat([memory, context_condition], dim=1)  # (batch_size, num_patches+2, d_model)
         
         if use_teacher_forcing and target is not None:
             # Teacher forcing: use ground truth as input, properly aligned for prediction
             # Input: [start_token, target[0], target[1], ..., target[n-2]]
             # Output: [target[0], target[1], target[2], ..., target[n-1]]
 
-            start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
+            # Generate conditional start token from context condition (CLS token)
+            start_tokens = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
             # Use target[:-1] (all but last element) to predict target (all elements)
             decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
             
@@ -653,41 +754,50 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             tgt_len = decoder_input.size(1)
             tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
             
-            # Pass through decoder layers
+            # Pass through decoder layers (teacher forcing mode - process entire sequence)
             output = decoder_input
             for layer in self.decoder_layers:
-                output = layer(output, memory, tgt_mask=tgt_mask)
+                # For teacher forcing, we don't use KV-caching, just pass None for decoder_kv_cache
+                output, _ = layer(output, encoder_memory, decoder_kv_cache=None, tgt_mask=tgt_mask)
             
             # Project to output dimension - now directly predicts target
             output = self.output_projection(output)  # (batch_size, pred_len, ts_dim)
             
         else:
-            # Inference mode: autoregressive generation
+            # Inference mode: autoregressive generation with KV-caching
             predictions = []
+            decoder_kv_cache = None  # Initialize empty cache
             
-            # Start with start token
-            current_input = self.start_token.expand(batch_size, 1, self.time_series_dim)
+            # Start with conditional start token from context condition (CLS token)
+            current_input = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
             
             for step in range(self.prediction_length):
-                # Embed current sequence
-                embedded = self.value_embedding(current_input)  # (batch_size, step+1, d_model)
+                # Embed current step only (not entire sequence)
+                embedded = self.value_embedding(current_input)  # [batch, 1, d_model]
                 embedded = self.pos_encoding(embedded)
                 
-                # Create causal mask
-                tgt_len = embedded.size(1)
-                tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
+                # Pass through decoder layers with KV-caching (no causal mask needed)
+                step_output = embedded
+                new_kvs = []
                 
-                # Pass through decoder layers
-                output = embedded
                 for layer in self.decoder_layers:
-                    output = layer(output, memory, tgt_mask=tgt_mask)
+                    step_output, new_kv = layer(step_output, encoder_memory, decoder_kv_cache, tgt_mask=None)
+                    new_kvs.append(new_kv)
+                
+                # Update KV cache with new values (use the step_output for next iteration)
+                if decoder_kv_cache is None:
+                    # First step: initialize cache
+                    decoder_kv_cache = step_output  # [batch, 1, d_model]
+                else:
+                    # Subsequent steps: append to cache
+                    decoder_kv_cache = torch.cat([decoder_kv_cache, step_output], dim=1)  # [batch, step+1, d_model]
                 
                 # Get prediction for next time step
-                next_pred = self.output_projection(output[:, -1:, :])  # (batch_size, 1, ts_dim)
+                next_pred = self.output_projection(step_output)  # [batch, 1, time_series_dim]
                 predictions.append(next_pred)
                 
-                # Append prediction to input for next iteration
-                current_input = torch.cat([current_input, next_pred], dim=1)
+                # Update current input for next step
+                current_input = next_pred
             
             # Concatenate predictions
             output = torch.cat(predictions, dim=1)  # (batch_size, pred_len, ts_dim)
@@ -736,7 +846,7 @@ class Model(nn.Module):
             image_width=128,   # Fixed for resized spectrograms  
             in_channels=self.num_channels,
             embed_dim=768,
-            depth=3,
+            depth=2,
             num_heads=12,
             mlp_ratio=4,
             dropout=0.1
@@ -768,8 +878,8 @@ class Model(nn.Module):
         device = next(self.parameters()).device
         batch_size = x_enc.size(0)
         
-        # Step 1: Get last feature column of context as condition
-        context_condition = x_enc[:, :, -1]  # (batch, seq_len)
+        # Step 1
+        
         
         # Step 2: Generate spectrograms from input context
         spectra_list = []
@@ -778,11 +888,13 @@ class Model(nn.Module):
             spectra_list.append(spectra)
         
         # Stack into batch tensor
-        spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, 128, 128)
+        spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, features, 128, 128)
         
         # Step 3: Process through ViT encoder
         vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
-        encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, feature_projection_dim)
+        encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, 128)
+
+        context_condition = encoder_features[:, 0, :].unsqueeze(1)  # (batch, first patch ([CLS]), 128)
         
         # Step 4: Process through decoder with teacher forcing control
         if self.use_teacher_forcing:
