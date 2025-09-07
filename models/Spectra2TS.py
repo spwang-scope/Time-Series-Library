@@ -605,7 +605,7 @@ class TransformerDecoderLayer(nn.Module):
             new_kv: New K,V to add to cache [batch, 1, d_model] for inference, None for teacher forcing
         """
         # Self-attention with residual connection
-        tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)[0]
+        tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=None)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
         
