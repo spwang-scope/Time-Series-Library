@@ -676,7 +676,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         )
         
         # Project context condition to time series dimension for start token
-        self.context_to_start_token = nn.Linear(d_model, time_series_dim)
+        self.context_to_start_token = nn.Linear(encoder_dim, time_series_dim)
         
         
         # Initialize parameters
@@ -727,14 +727,14 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         batch_size = encoder_output.size(0)
         device = encoder_output.device
         
-        # Project encoder output for cross-attention K, V
-        memory = self.encoder_projection(encoder_output)  # (batch_size, num_patches+1, d_model)
+        # Project encoder output for cross-attention K, V (768 -> 128)
+        memory = self.encoder_projection(encoder_output)  # (batch_size, num_patches+1, d_model=128)
         
-        print("context_condition shape:", context_condition.shape)  # Debugging line
-        # Use context condition directly (already has correct shape and dimension)
+        # Project context condition to match d_model dimension for concatenation (128 -> 128)
+        context_condition_projected = self.encoder_projection(context_condition)  # (batch_size, 1, d_model=128)
         
         # Combine encoder output with context condition for cross-attention
-        encoder_memory = torch.cat([memory, context_condition], dim=1)  # (batch_size, num_patches+2, d_model)
+        encoder_memory = torch.cat([memory, context_condition_projected], dim=1)  # (batch_size, num_patches+2, d_model=128)
         
         if use_teacher_forcing and target is not None:
             # Teacher forcing: use ground truth as input, properly aligned for prediction
