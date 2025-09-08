@@ -191,10 +191,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
 
+                # First do backward pass to compute gradients
+                if self.args.use_amp:
+                    ampscaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     
-                    # DEBUG: Critical learning signal metrics
+                    # DEBUG: Critical learning signal metrics (AFTER backward pass)
                     print(f"\t[CRITICAL] Loss requires_grad: {loss.requires_grad}")
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
                     print(f"\t[CRITICAL] Gradient norm: {grad_norm:.6f}")
@@ -220,15 +226,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     iter_count = 0
                     time_now = time.time()
 
+                # Apply gradient clipping and optimizer step (gradients already computed above)
                 if self.args.use_amp:
-                    ampscaler.scale(loss).backward()
                     # Add gradient clipping for stability
                     ampscaler.unscale_(model_optim)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     ampscaler.step(model_optim)
                     ampscaler.update()
                 else:
-                    loss.backward()
                     # Add gradient clipping for stability
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     model_optim.step()

@@ -747,6 +747,11 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Generate conditional start token from context condition (CLS token)
             start_tokens = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
             
+            # DEBUG: Compare start token with first target value
+            first_target = target[:, 0, :].mean()
+            start_token_mean = start_tokens.mean()
+            print(f"[DEBUG TF START] Start token mean: {start_token_mean:.4f}, First target mean: {first_target:.4f}, Diff: {(start_token_mean - first_target):.4f}")
+            
             # Use target[:-1] (all but last element) to predict target (all elements)
             decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
             
@@ -770,6 +775,9 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
             # Start with conditional start token from context condition (CLS token)
             current_input = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
+            
+            # DEBUG: Log start token quality for first step analysis
+            print(f"[DEBUG FIRST STEP] Start token range: [{current_input.min():.4f}, {current_input.max():.4f}], mean: {current_input.mean():.4f}")
             
             for step in range(self.prediction_length):
                 # Embed current step only (not entire sequence)
@@ -795,6 +803,10 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 # Get prediction for next time step
                 next_pred = self.output_projection(step_output)  # [batch, 1, time_series_dim]
                 predictions.append(next_pred)
+                
+                # DEBUG: Log first few predictions to analyze sharp drop
+                if step < 5:  # First 5 steps
+                    print(f"[DEBUG FIRST STEP] Step {step}: input=[{current_input.mean():.4f}], pred=[{next_pred.mean():.4f}], diff=[{(next_pred.mean() - current_input.mean()):.4f}]")
                 
                 # Update current input for next step
                 current_input = next_pred
@@ -922,9 +934,13 @@ class Model(nn.Module):
             target_features = tf_target[:, :, -1:]  # Same target used in decoder
             pred_target_mse = torch.nn.functional.mse_loss(predictions, target_features)
             pred_target_mae = torch.nn.functional.l1_loss(predictions, target_features)
+            
+            # DEBUG: Analyze first prediction accuracy specifically
+            first_pred_error = torch.nn.functional.mse_loss(predictions[:, 0:1, :], target_features[:, 0:1, :])
+            print(f"[DEBUG LEARNING] First prediction MSE: {first_pred_error.item():.6f}")
+            print(f"[DEBUG LEARNING] Overall MSE: {pred_target_mse.item():.6f}")
             print(f"[DEBUG LEARNING] Prediction range: [{predictions.min():.4f}, {predictions.max():.4f}], mean: {predictions.mean():.4f}")
             print(f"[DEBUG LEARNING] Target range: [{target_features.min():.4f}, {target_features.max():.4f}], mean: {target_features.mean():.4f}")
-            print(f"[DEBUG LEARNING] Pred-Target MSE: {pred_target_mse.item():.6f}, MAE: {pred_target_mae.item():.6f}")
         else:
             print(f"[DEBUG LEARNING] Inference prediction range: [{predictions.min():.4f}, {predictions.max():.4f}], mean: {predictions.mean():.4f}")
         
