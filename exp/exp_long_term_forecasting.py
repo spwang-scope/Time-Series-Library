@@ -93,6 +93,37 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model.train()
         return total_loss
 
+    def _verify_teacher_forcing_alignment(self, vali_loader):
+        """Verify that teacher forcing and inference modes produce similar results."""
+        self.model.eval()
+        with torch.no_grad():
+            # Take first batch for comparison
+            for batch_x, batch_y, batch_x_mark, batch_y_mark in vali_loader:
+                batch_x = batch_x.float().to(self.device)
+                batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
+                batch_y_mark = batch_y_mark.float().to(self.device)
+                
+                f_dim = -1 if self.args.features == 'MS' else 0
+                batch_y = batch_y[:, -self.args.pred_len:, f_dim:]
+                
+                # Teacher forcing mode
+                if hasattr(self.model, 'set_teacher_forcing_mode'):
+                    self.model.set_teacher_forcing_mode(True)
+                tf_outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=batch_y)
+                
+                # Inference mode  
+                if hasattr(self.model, 'set_teacher_forcing_mode'):
+                    self.model.set_teacher_forcing_mode(False)
+                inf_outputs = self.model(batch_x, batch_x_mark, batch_y, batch_y_mark, tf_target=None)
+                
+                # Compare results
+                mse_diff = torch.nn.functional.mse_loss(tf_outputs, inf_outputs).item()
+                print(f"[DEBUG TF Alignment] Teacher forcing vs Inference MSE diff: {mse_diff:.6f}")
+                print(f"[DEBUG TF Alignment] TF range: [{tf_outputs.min():.4f}, {tf_outputs.max():.4f}], INF range: [{inf_outputs.min():.4f}, {inf_outputs.max():.4f}]")
+                break  # Only check first batch
+        self.model.train()
+
     def train(self, setting):
         
 
@@ -151,6 +182,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    # DEBUG: Log gradient norms and data statistics
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
+                    print(f"\t[DEBUG train] Gradient norm: {grad_norm:.6f}")
+                    print(f"\t[DEBUG train] batch_x range: [{batch_x.min():.4f}, {batch_x.max():.4f}], mean: {batch_x.mean():.4f}")
+                    print(f"\t[DEBUG train] batch_y range: [{batch_y.min():.4f}, {batch_y.max():.4f}], mean: {batch_y.mean():.4f}")
+                    print(f"\t[DEBUG train] outputs range: [{outputs.min():.4f}, {outputs.max():.4f}], mean: {outputs.mean():.4f}")
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
@@ -159,10 +196,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 if self.args.use_amp:
                     ampscaler.scale(loss).backward()
+                    # Add gradient clipping for stability
+                    ampscaler.unscale_(model_optim)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     ampscaler.step(model_optim)
                     ampscaler.update()
                 else:
                     loss.backward()
+                    # Add gradient clipping for stability
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     model_optim.step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
@@ -172,6 +214,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+            
+            # DEBUG: Verify teacher forcing alignment (once per epoch)
+            if epoch % 1 == 0:  # Every epoch
+                self._verify_teacher_forcing_alignment(vali_loader)
+            
             early_stopping(vali_loss, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
