@@ -143,10 +143,21 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
+        
+        # DEBUG: Check critical model status at start
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+        print(f"[DEBUG init] Total: {total_params:,}, Trainable: {trainable_params:,}, Frozen: {frozen_params:,}")
+        print(f"[DEBUG init] Model training mode: {self.model.training}")
 
         if self.args.use_amp:
             ampscaler = torch.cuda.amp.GradScaler()
 
+        # Track prediction changes to detect learning
+        prev_predictions = None
+        prediction_change_threshold = 1e-8
+        
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
@@ -182,12 +193,27 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
-                    # DEBUG: Log gradient norms and data statistics
+                    
+                    # DEBUG: Critical learning signal metrics
+                    print(f"\t[CRITICAL] Loss requires_grad: {loss.requires_grad}")
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
-                    print(f"\t[DEBUG train] Gradient norm: {grad_norm:.6f}")
-                    print(f"\t[DEBUG train] batch_x range: [{batch_x.min():.4f}, {batch_x.max():.4f}], mean: {batch_x.mean():.4f}")
-                    print(f"\t[DEBUG train] batch_y range: [{batch_y.min():.4f}, {batch_y.max():.4f}], mean: {batch_y.mean():.4f}")
-                    print(f"\t[DEBUG train] outputs range: [{outputs.min():.4f}, {outputs.max():.4f}], mean: {outputs.mean():.4f}")
+                    print(f"\t[CRITICAL] Gradient norm: {grad_norm:.6f}")
+                    
+                    # Learning signal analysis
+                    pred_target_mse = torch.nn.functional.mse_loss(outputs, batch_y)
+                    pred_target_mae = torch.nn.functional.l1_loss(outputs, batch_y)
+                    print(f"\t[CRITICAL] Pred-Target MSE: {pred_target_mse.item():.6f}, MAE: {pred_target_mae.item():.6f}")
+                    print(f"\t[CRITICAL] Target range: [{batch_y.min():.4f}, {batch_y.max():.4f}], mean: {batch_y.mean():.4f}")
+                    print(f"\t[CRITICAL] Output range: [{outputs.min():.4f}, {outputs.max():.4f}], mean: {outputs.mean():.4f}")
+                    
+                    # Check if predictions are changing (learning indicator)
+                    if prev_predictions is not None:
+                        pred_change = torch.nn.functional.mse_loss(outputs, prev_predictions)
+                        print(f"\t[CRITICAL] Prediction change: {pred_change.item():.8f} (threshold: {prediction_change_threshold:.8f})")
+                        if pred_change.item() < prediction_change_threshold:
+                            print(f"\t[WARNING] Predictions not changing - model may not be learning!")
+                    prev_predictions = outputs.detach().clone()
+                    
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))

@@ -730,11 +730,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         batch_size = encoder_output.size(0)
         device = encoder_output.device
         
-        # DEBUG: Log decoder inputs
-        print(f"[DEBUG decoder] encoder_output shape: {encoder_output.shape}, range: [{encoder_output.min():.4f}, {encoder_output.max():.4f}]")
-        print(f"[DEBUG decoder] context_condition shape: {context_condition.shape}, range: [{context_condition.min():.4f}, {context_condition.max():.4f}]")
-        print(f"[DEBUG decoder] use_teacher_forcing: {use_teacher_forcing}")
-        
         # Project encoder output for cross-attention K, V (768 -> 128)
         memory = self.encoder_projection(encoder_output)  # (batch_size, num_patches+1, d_model=128)
         
@@ -744,9 +739,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Combine encoder output with context condition for cross-attention
         encoder_memory = torch.cat([memory, context_condition_projected], dim=1)  # (batch_size, num_patches+2, d_model=128)
         
-        # DEBUG: Log encoder memory statistics
-        print(f"[DEBUG decoder] encoder_memory shape: {encoder_memory.shape}, range: [{encoder_memory.min():.4f}, {encoder_memory.max():.4f}], mean: {encoder_memory.mean():.4f}, std: {encoder_memory.std():.4f}")
-        
         if use_teacher_forcing and target is not None:
             # Teacher forcing: use ground truth as input, properly aligned for prediction
             # Input: [start_token, target[0], target[1], ..., target[n-2]]
@@ -755,13 +747,8 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Generate conditional start token from context condition (CLS token)
             start_tokens = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
             
-            # DEBUG: Log start token and target alignment
-            print(f"[DEBUG decoder TF] start_tokens shape: {start_tokens.shape}, range: [{start_tokens.min():.4f}, {start_tokens.max():.4f}]")
-            print(f"[DEBUG decoder TF] target shape: {target.shape}, range: [{target.min():.4f}, {target.max():.4f}]")
-            
             # Use target[:-1] (all but last element) to predict target (all elements)
             decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
-            print(f"[DEBUG decoder TF] decoder_input shape: {decoder_input.shape}, range: [{decoder_input.min():.4f}, {decoder_input.max():.4f}]")
             
             # Embed and add positional encoding
             decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len, d_model)
@@ -776,9 +763,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Project to output dimension - now directly predicts target
             output = self.output_projection(output)  # (batch_size, pred_len, ts_dim)
             
-            # DEBUG: Log teacher forcing output
-            print(f"[DEBUG decoder TF] final output shape: {output.shape}, range: [{output.min():.4f}, {output.max():.4f}], mean: {output.mean():.4f}")
-            
         else:
             # Inference mode: autoregressive generation with KV-caching
             predictions = []
@@ -786,9 +770,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
             # Start with conditional start token from context condition (CLS token)
             current_input = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
-            
-            # DEBUG: Log inference start token
-            print(f"[DEBUG decoder INF] inference start_token shape: {current_input.shape}, range: [{current_input.min():.4f}, {current_input.max():.4f}]")
             
             for step in range(self.prediction_length):
                 # Embed current step only (not entire sequence)
@@ -820,9 +801,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
             # Concatenate predictions
             output = torch.cat(predictions, dim=1)  # (batch_size, pred_len, ts_dim)
-            
-            # DEBUG: Log inference final output
-            print(f"[DEBUG decoder INF] final output shape: {output.shape}, range: [{output.min():.4f}, {output.max():.4f}], mean: {output.mean():.4f}")
         
         return output
 
@@ -900,12 +878,6 @@ class Model(nn.Module):
         device = next(self.parameters()).device
         batch_size = x_enc.size(0)
         
-        # DEBUG: Log input statistics
-        print(f"[DEBUG forecast()] Input x_enc shape: {x_enc.shape}, range: [{x_enc.min():.4f}, {x_enc.max():.4f}], mean: {x_enc.mean():.4f}, std: {x_enc.std():.4f}")
-        if tf_target is not None:
-            print(f"[DEBUG forecast()] tf_target shape: {tf_target.shape}, range: [{tf_target.min():.4f}, {tf_target.max():.4f}], mean: {tf_target.mean():.4f}, std: {tf_target.std():.4f}")
-        print(f"[DEBUG forecast()] Teacher forcing mode: {self.use_teacher_forcing}")
-        
         # Step 2: Generate spectrograms from input context
         spectra_list = []
         for item in x_enc:
@@ -915,19 +887,11 @@ class Model(nn.Module):
         # Stack into batch tensor
         spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, features, 128, 128)
         
-        # DEBUG: Log STFT statistics
-        print(f"[DEBUG forecast()] STFT spectra_tensor shape: {spectra_tensor.shape}, range: [{spectra_tensor.min():.4f}, {spectra_tensor.max():.4f}], mean: {spectra_tensor.mean():.4f}, std: {spectra_tensor.std():.4f}")
-        
         # Step 3: Process through ViT encoder
         vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
         encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, 128)
 
-        # DEBUG: Log ViT encoder output statistics
-        print(f"[DEBUG forecast()] ViT features shape: {vit_features.shape}, range: [{vit_features.min():.4f}, {vit_features.max():.4f}], mean: {vit_features.mean():.4f}, std: {vit_features.std():.4f}")
-        print(f"[DEBUG forecast()] Encoder features shape: {encoder_features.shape}, range: [{encoder_features.min():.4f}, {encoder_features.max():.4f}], mean: {encoder_features.mean():.4f}, std: {encoder_features.std():.4f}")
-
         context_condition = encoder_features[:, 0, :].unsqueeze(1)  # (batch, first patch ([CLS]), 128)
-        print(f"[DEBUG forecast()] Context condition shape: {context_condition.shape}, range: [{context_condition.min():.4f}, {context_condition.max():.4f}], mean: {context_condition.mean():.4f}, std: {context_condition.std():.4f}")
         
         # Step 4: Process through decoder with teacher forcing control
         if self.use_teacher_forcing:
@@ -953,11 +917,16 @@ class Model(nn.Module):
                 use_teacher_forcing=False
             )
         
-        # DEBUG: Log final predictions
-        print(f"[DEBUG forecast()] Final predictions shape: {predictions.shape}, range: [{predictions.min():.4f}, {predictions.max():.4f}], mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
+        # DEBUG: Focus on prediction-target learning signal
         if tf_target is not None and self.use_teacher_forcing:
-            mse_loss = torch.nn.functional.mse_loss(predictions, target_features)
-            print(f"[DEBUG forecast()] MSE loss between predictions and target: {mse_loss.item():.6f}")
+            target_features = tf_target[:, :, -1:]  # Same target used in decoder
+            pred_target_mse = torch.nn.functional.mse_loss(predictions, target_features)
+            pred_target_mae = torch.nn.functional.l1_loss(predictions, target_features)
+            print(f"[DEBUG LEARNING] Prediction range: [{predictions.min():.4f}, {predictions.max():.4f}], mean: {predictions.mean():.4f}")
+            print(f"[DEBUG LEARNING] Target range: [{target_features.min():.4f}, {target_features.max():.4f}], mean: {target_features.mean():.4f}")
+            print(f"[DEBUG LEARNING] Pred-Target MSE: {pred_target_mse.item():.6f}, MAE: {pred_target_mae.item():.6f}")
+        else:
+            print(f"[DEBUG LEARNING] Inference prediction range: [{predictions.min():.4f}, {predictions.max():.4f}], mean: {predictions.mean():.4f}")
         
         return predictions
 
