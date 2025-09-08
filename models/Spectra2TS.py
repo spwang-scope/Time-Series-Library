@@ -677,6 +677,9 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Project context condition to time series dimension for start token
         self.context_to_start_token = nn.Linear(encoder_dim, time_series_dim)
         
+        # Learnable fusion layer to combine context and input continuity
+        self.start_token_fusion = nn.Linear(time_series_dim * 2, time_series_dim)
+        
         
         # Initialize parameters
         self._initialize_parameters()
@@ -696,6 +699,10 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         nn.init.xavier_uniform_(self.context_to_start_token.weight)
         nn.init.constant_(self.context_to_start_token.bias, 0.0)  # Zero bias for start token generation
         
+        # Initialize start token fusion layer
+        nn.init.xavier_uniform_(self.start_token_fusion.weight)
+        nn.init.constant_(self.start_token_fusion.bias, 0.0)
+        
         # Initialize output projection with smaller weights for stable training
         for i, layer in enumerate(self.output_projection):
             if isinstance(layer, nn.Linear):
@@ -712,6 +719,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         self, 
         encoder_output: torch.Tensor,
         context_condition: torch.Tensor,
+        x_enc: torch.Tensor,  # Input context for last value extraction
         target: Optional[torch.Tensor] = None,
         use_teacher_forcing: bool = True
     ) -> torch.Tensor:
@@ -744,13 +752,21 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Input: [start_token, target[0], target[1], ..., target[n-2]]
             # Output: [target[0], target[1], target[2], ..., target[n-1]]
 
-            # Generate conditional start token from context condition (CLS token)
-            start_tokens = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
+            # Generate fusion-based start token combining context and input continuity
+            last_input_value = x_enc[:, -1, -1:].unsqueeze(1)  # [batch, 1, time_series_dim] - last input value
+            context_start = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim] - context-based start
             
-            # DEBUG: Compare start token with first target value
+            # Learnable fusion of context and continuity
+            combined_input = torch.cat([context_start, last_input_value], dim=-1)  # [batch, 1, time_series_dim*2]
+            start_tokens = self.start_token_fusion(combined_input)  # [batch, 1, time_series_dim]
+            
+            # DEBUG: Compare fusion components and result with first target value
             first_target = target[:, 0, :].mean()
             start_token_mean = start_tokens.mean()
-            print(f"[DEBUG TF START] Start token mean: {start_token_mean:.4f}, First target mean: {first_target:.4f}, Diff: {(start_token_mean - first_target):.4f}")
+            context_start_mean = context_start.mean()
+            last_input_mean = last_input_value.mean()
+            print(f"[DEBUG TF FUSION] Context: {context_start_mean:.4f}, LastInput: {last_input_mean:.4f}, Fused: {start_token_mean:.4f}")
+            print(f"[DEBUG TF FUSION] Target: {first_target:.4f}, Diff: {(start_token_mean - first_target):.4f}")
             
             # Use target[:-1] (all but last element) to predict target (all elements)
             decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
@@ -773,10 +789,19 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             predictions = []
             decoder_kv_cache = None  # Initialize empty cache
             
-            # Start with conditional start token from context condition (CLS token)
-            current_input = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim]
+            # Generate fusion-based start token combining context and input continuity
+            last_input_value = x_enc[:, -1, -1:].unsqueeze(1)  # [batch, 1, time_series_dim] - last input value
+            context_start = self.context_to_start_token(context_condition)  # [batch, 1, time_series_dim] - context-based start
             
-            # DEBUG: Log start token quality for first step analysis
+            # Learnable fusion of context and continuity (same as teacher forcing)
+            combined_input = torch.cat([context_start, last_input_value], dim=-1)  # [batch, 1, time_series_dim*2]
+            current_input = self.start_token_fusion(combined_input)  # [batch, 1, time_series_dim]
+            
+            # DEBUG: Log fusion components and result for first step analysis
+            context_start_mean = context_start.mean()
+            last_input_mean = last_input_value.mean()
+            start_token_mean = current_input.mean()
+            print(f"[DEBUG INF FUSION] Context: {context_start_mean:.4f}, LastInput: {last_input_mean:.4f}, Fused: {start_token_mean:.4f}")
             print(f"[DEBUG FIRST STEP] Start token range: [{current_input.min():.4f}, {current_input.max():.4f}], mean: {current_input.mean():.4f}")
             
             for step in range(self.prediction_length):
@@ -917,6 +942,7 @@ class Model(nn.Module):
             predictions = self.ts_decoder(
                 encoder_output=encoder_features,
                 context_condition=context_condition,
+                x_enc=x_enc,
                 target=target_features,
                 use_teacher_forcing=True
             )
@@ -925,6 +951,7 @@ class Model(nn.Module):
             predictions = self.ts_decoder(
                 encoder_output=encoder_features,
                 context_condition=context_condition,
+                x_enc=x_enc,
                 target=None,
                 use_teacher_forcing=False
             )
