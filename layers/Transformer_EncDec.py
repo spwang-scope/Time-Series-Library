@@ -94,20 +94,21 @@ class DecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
+        self.resweight = nn.Parameter(torch.Tensor([0]))
 
     def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         x = x + self.dropout(self.self_attention(
             x, x, x,
             attn_mask=x_mask,
             tau=tau, delta=None
-        )[0])
+        )[0]) * self.resweight
         x = self.norm1(x)
 
         x = x + self.dropout(self.cross_attention(
             x, cross, cross,
             attn_mask=cross_mask,
             tau=tau, delta=delta
-        )[0])
+        )[0]) * self.resweight
 
         y = x = self.norm2(x)
         y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
