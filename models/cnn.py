@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
-from layers.Embed import DataEmbedding
+from layers.Embed import DataEmbedding, TokenEmbedding, PositionalEmbedding
 from layers.Conv_Blocks import Inception_Block_V1
 from einops.layers.torch import Rearrange
 import torchvision.models as models
@@ -207,6 +207,10 @@ class Model(nn.Module):
         #self.patch_embedding = PatchEmbedding(
         #    d_model=configs.d_model, patch_len=8, stride=8, padding=0, dropout=configs.dropout)
 
+        self.c_in = configs.dec_in
+        self.d_model = configs.d_model
+
+
         self.dec_embedding = DataEmbedding(configs.dec_in, configs.d_model, configs.embed, configs.freq,
                                                configs.dropout)
         self.enc_embedding = DataEmbedding(configs.enc_in, configs.d_model, configs.embed, configs.freq,
@@ -227,23 +231,23 @@ class Model(nn.Module):
             self.projection = nn.Linear(
                 configs.d_model * configs.seq_len, configs.num_class)
             
-        self.my_resnet = models.resnet34(weights=None,progress=False)
+        self.my_resnet = models.resnet50(weights=None,progress=False)
         self.my_resnet.conv1 = nn.Conv2d(configs.enc_in, 64, kernel_size=8, stride=8, padding=0, bias=False)
 
         self.my_resnet.maxpool = nn.Sequential(
-            nn.MaxPool2d(kernel_size=3, stride=1, padding=1),  # 局部擴散，保持大小
+            nn.MaxPool2d(kernel_size=7, stride=1, padding=1),  # 局部擴散，保持大小
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
+            nn.InstanceNorm2d(64),
+            nn.GELU()
         )
-        self.my_resnet.layer2[0].conv1.stride = (1, 1)
-        self.my_resnet.layer2[0].downsample[0].stride = (1, 1)
-        self.my_resnet.layer3[0].conv1.stride = (1, 1)
-        self.my_resnet.layer3[0].downsample[0].stride = (1, 1)
-        self.my_resnet.layer4[0].conv1.stride = (1, 1)
-        self.my_resnet.layer4[0].downsample[0].stride = (1, 1)
+        #self.my_resnet.layer2[0].conv1.stride = (1, 1)
+        #self.my_resnet.layer2[0].downsample[0].stride = (1, 1)
+        #self.my_resnet.layer3[0].conv1.stride = (1, 1)
+        #self.my_resnet.layer3[0].downsample[0].stride = (1, 1)
+        #self.my_resnet.layer4[0].conv1.stride = (1, 1)
+        #self.my_resnet.layer4[0].downsample[0].stride = (1, 1)
         self.my_resnet.avgpool = nn.AdaptiveMaxPool2d((7, 7))  # 去掉avgpool
-        self.my_resnet.fc = Rearrange('b (h w c) -> b (h w) c', h=7, w=7, c=512)
+        self.my_resnet.fc = Rearrange('b (h w f c) -> b (f h w) c', h=7, w=7, c=512)
 
         self.decoder = Decoder(
                 [
@@ -264,8 +268,12 @@ class Model(nn.Module):
                     for l in range(configs.d_layers)
                 ],
                 norm_layer=torch.nn.LayerNorm(configs.d_model),
-                projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
+                #projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
+                projection=None
             )
+        
+        self.value_embedding = TokenEmbedding(c_in=self.c_in, d_model=self.d_model)
+        self.position_embedding = PositionalEmbedding(d_model=self.d_model)
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # Normalization from Non-stationary Transformer
@@ -294,12 +302,16 @@ class Model(nn.Module):
 
         enc_out = self.my_resnet(spectra_tensor)
 
-        dec_out = self.dec_embedding(x_dec, x_mark_dec)
+        # init dec_out starting tokens with 
+        dec_out = self.enc_embedding(x_enc, x_mark_enc)  # [B,T,C]
+        dec_out = self.predict_linear(dec_out.permute(0, 2, 1)).permute(0, 2, 1)
+        
         dec_out = self.decoder(dec_out, enc_out, x_mask=None, cross_mask=None)
 
-        dec_out_length = dec_out.shape[1]
+        dec_out = self.projection(dec_out)
 
         # De-Normalization from Non-stationary Transformer
+        dec_out_length = dec_out.shape[1]
         dec_out = dec_out.mul(
                   (stdev[:, 0, :].unsqueeze(1).repeat(
                       1, dec_out_length, 1)))
