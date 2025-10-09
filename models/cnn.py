@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
+import math
 from layers.Embed import DataEmbedding, TokenEmbedding, PositionalEmbedding
 from layers.Conv_Blocks import Inception_Block_V1
 from einops.layers.torch import Rearrange
 import torchvision.models as models
-from layers.Transformer_EncDec import Decoder, DecoderLayer
+from layers.Transformer_EncDec import *
 from layers.SelfAttention_Family import FullAttention, AttentionLayer
 
 def get_STFT_spectra(tensor_data, target_width=None, device='cuda') -> torch.Tensor:
@@ -189,6 +190,67 @@ class TimesBlock(nn.Module):
         return res
 '''
 
+class PositionalEncoding2D(nn.Module):
+    """
+    Non-learnable 2D Sinusoidal Positional Encoding
+    Based on the extension of "Attention is All You Need" to 2D data.
+    
+    The encoding is calculated as:
+    PE(x,y,2i) = sin(x/10000^(4i/D))
+    PE(x,y,2i+1) = cos(x/10000^(4i/D))
+    PE(x,y,2j+D/2) = sin(y/10000^(4j/D))
+    PE(x,y,2j+1+D/2) = cos(y/10000^(4j/D))
+    
+    where (x,y) is the spatial position and D is the channel dimension.
+    """
+    def __init__(self, channels, height, width):
+        """
+        Args:
+            channels: Number of channels (must be divisible by 4)
+            height: Height of the spatial dimensions
+            width: Width of the spatial dimensions
+        """
+        super().__init__()
+        
+        if channels % 4 != 0:
+            raise ValueError(f"Cannot use 2D sinusoidal positional encoding with "
+                           f"channel dimension not divisible by 4 (got {channels})")
+        
+        self.channels = channels
+        self.height = height
+        self.width = width
+        
+        # Pre-compute the positional encoding (non-learnable)
+        pe = torch.zeros(channels, height, width)
+        
+        # Calculate position indices
+        y_position = torch.arange(0, height).unsqueeze(1).repeat(1, width)  # (H, W)
+        x_position = torch.arange(0, width).unsqueeze(0).repeat(height, 1)  # (H, W)
+        
+        # Calculate div_term for frequency scaling
+        div_term = torch.exp(torch.arange(0, channels // 2, 2).float() * 
+                            -(math.log(10000.0) / (channels // 2)))
+        
+        # Encode x-position in first half of channels
+        pe[0::4, :, :] = torch.sin(x_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        pe[1::4, :, :] = torch.cos(x_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        
+        # Encode y-position in second half of channels
+        pe[2::4, :, :] = torch.sin(y_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        pe[3::4, :, :] = torch.cos(y_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        
+        # Register as buffer (not a parameter, moves with model to device)
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, C, H, W)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape (B, C, H, W)
+        Returns:
+            x + positional_encoding of shape (B, C, H, W)
+        """
+        return x + self.pe
+
 class Model(nn.Module):
     """
     Paper link: https://openreview.net/pdf?id=ju_Uqw384Oq
@@ -219,9 +281,14 @@ class Model(nn.Module):
         self.layer_norm = nn.LayerNorm(configs.d_model)
         if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
             self.predict_linear = nn.Linear(
-                self.seq_len, self.pred_len + self.seq_len)
-            self.projection = nn.Linear(
-                configs.d_model, configs.c_out, bias=True)
+                self.seq_len, self.pred_len)
+            self.projection = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model//2),
+                nn.GELU(),
+                nn.Linear(configs.d_model//2, configs.d_model//4, bias=True),
+                nn.GELU(),
+                nn.Linear(configs.d_model//4, configs.c_out, bias=True)
+            )
         if self.task_name == 'imputation' or self.task_name == 'anomaly_detection':
             self.projection = nn.Linear(
                 configs.d_model, configs.c_out, bias=True)
@@ -231,24 +298,29 @@ class Model(nn.Module):
             self.projection = nn.Linear(
                 configs.d_model * configs.seq_len, configs.num_class)
             
+        class Squeeze(nn.Module):
+            def forward(self, x, dim=2):
+                return torch.squeeze(x,dim)
+            
         self.my_resnet = models.resnet50(weights=None,progress=False)
-        self.my_resnet.conv1 = nn.Conv2d(configs.enc_in, 64, kernel_size=8, stride=8, padding=0, bias=False)
+        self.my_resnet.conv1 = nn.Sequential(
+            nn.Conv3d(in_channels=configs.enc_in, out_channels=64, kernel_size=(1,8,8), stride=(1,3,3), padding=0, bias=False),
+            Squeeze()
+        )
 
         self.my_resnet.maxpool = nn.Sequential(
             nn.MaxPool2d(kernel_size=7, stride=1, padding=1),  # 局部擴散，保持大小
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(64, 64, kernel_size=7, stride=1, padding=1, bias=False),
             nn.InstanceNorm2d(64),
             nn.GELU()
         )
-        #self.my_resnet.layer2[0].conv1.stride = (1, 1)
-        #self.my_resnet.layer2[0].downsample[0].stride = (1, 1)
-        #self.my_resnet.layer3[0].conv1.stride = (1, 1)
-        #self.my_resnet.layer3[0].downsample[0].stride = (1, 1)
-        #self.my_resnet.layer4[0].conv1.stride = (1, 1)
-        #self.my_resnet.layer4[0].downsample[0].stride = (1, 1)
-        self.my_resnet.avgpool = nn.AdaptiveMaxPool2d((7, 7))  # 去掉avgpool
+        self.my_resnet.avgpool = nn.Sequential(
+            nn.AdaptiveMaxPool2d((7, 7)), 
+            PositionalEncoding2D(2048, 7, 7)
+        )
         self.my_resnet.fc = Rearrange('b (h w f c) -> b (f h w) c', h=7, w=7, c=512)
 
+        
         self.decoder = Decoder(
                 [
                     DecoderLayer(
@@ -271,11 +343,42 @@ class Model(nn.Module):
                 #projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
                 projection=None
             )
+        '''
         
-        self.value_embedding = TokenEmbedding(c_in=self.c_in, d_model=self.d_model)
+        self.decodera = AutoregressiveDecoder(
+            [
+                AutoregressiveDecoderLayer(
+                    AttentionLayer(
+                        FullAttention(False, configs.factor, attention_dropout=configs.dropout,
+                                    output_attention=False),
+                        configs.d_model, configs.n_heads),
+                    AttentionLayer(
+                        FullAttention(False, configs.factor, attention_dropout=configs.dropout,
+                                    output_attention=False),
+                        configs.d_model, configs.n_heads),
+                    configs.d_model,
+                    configs.d_ff,
+                    dropout=configs.dropout,
+                    activation=configs.activation,
+                )
+                for l in range(configs.d_layers)
+            ],
+            norm_layer=torch.nn.LayerNorm(configs.d_model),
+            #projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
+            projection=None
+        )
+        '''
+        self.token_embedding = TokenEmbedding(c_in=self.c_in, d_model=self.d_model)
         self.position_embedding = PositionalEmbedding(d_model=self.d_model)
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+        '''
+        means_ = x_enc.mean(1, keepdim=True)
+        x_diff = x_enc[:, 1:, :] - x_enc[:, :-1, :]
+        x_diff = torch.cat([means_, x_diff], dim=1)
+        x_ = x_enc
+        '''
+
         # Normalization from Non-stationary Transformer
         means = x_enc.mean(1, keepdim=True).detach()
         x_enc = x_enc.sub(means)
@@ -283,14 +386,7 @@ class Model(nn.Module):
             torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
         x_enc = x_enc.div(stdev)
 
-        # embedding
-        #enc_out = self.enc_embedding(x_enc, x_mark_enc)  # [B,T,C]
-        #enc_out = self.predict_linear(enc_out.permute(0, 2, 1)).permute(
-        #    0, 2, 1)  # align temporal dimension
-        # TimesNet
-        #for i in range(self.layer):
-        #    enc_out = self.layer_norm(self.model[i](enc_out))
-        # project back
+        
         device = next(self.parameters()).device
         spectra_list = []
         for item in x_enc:
@@ -300,15 +396,27 @@ class Model(nn.Module):
         # Stack into batch tensor
         spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, img_height, img_width)
 
-        enc_out = self.my_resnet(spectra_tensor)
+         # [B,T,C]
 
-        # init dec_out starting tokens with 
-        dec_out = self.enc_embedding(x_enc, x_mark_enc)  # [B,T,C]
-        dec_out = self.predict_linear(dec_out.permute(0, 2, 1)).permute(0, 2, 1)
+        spectra_tensor = spectra_tensor.unsqueeze(2)  # Add depth dimension for Conv3D
+        #spectra_tensor = spectra_tensor.permute(0, 1, 2, 3)
+        enc_out = self.my_resnet(spectra_tensor) # [B, 192, d_model]
+        #enc_out = self.enc_embedding(enc_out.permute(0, 2, 1), None)
+        #print(f"enc_out shape after ResNet: {enc_out.shape}")
+        x_enc = torch.cat([x_enc, torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2]).to(x_enc.device)], dim=1)
+        #print(f"x_enc shape after padding: {x_enc.shape}")
+
         
+
+        dec_out = self.dec_embedding(x_enc, None)
+        #print(f"dec_out shape after dec_embedding: {dec_out.shape}")
+        
+        #print(f"enc_out shape after ResNet: {enc_out.shape}")
         dec_out = self.decoder(dec_out, enc_out, x_mask=None, cross_mask=None)
+        #print(f"dec_out shape after Decoder: {dec_out.shape}")
 
         dec_out = self.projection(dec_out)
+
 
         # De-Normalization from Non-stationary Transformer
         dec_out_length = dec_out.shape[1]
