@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
+import math
 from layers.Embed import DataEmbedding, TokenEmbedding, PositionalEmbedding
 from layers.Conv_Blocks import Inception_Block_V1
 from einops.layers.torch import Rearrange
 import torchvision.models as models
 from layers.Transformer_EncDec import Decoder, DecoderLayer
 from layers.SelfAttention_Family import FullAttention, AttentionLayer
+import matplotlib.pyplot as plt
 
 def get_STFT_spectra(tensor_data, target_width=None, device='cuda') -> torch.Tensor:
     """
@@ -37,7 +39,7 @@ def get_STFT_spectra(tensor_data, target_width=None, device='cuda') -> torch.Ten
         target_width = time_length
     
     # Calculate STFT parameters
-    n_fft = 64  # This gives us 33 frequency bins (we'll use 32)
+    n_fft = 128  # This gives us 33 frequency bins (we'll use 32)
     
     # Calculate nperseg and noverlap to achieve target_width time frames (same logic as original)
     if target_width >= time_length:
@@ -79,12 +81,24 @@ def get_STFT_spectra(tensor_data, target_width=None, device='cuda') -> torch.Ten
             pad_mode='constant',
             return_complex=True
         )
-        
+
+        stft_result = stft_result[:(n_fft//2), :]
+        '''
         # Get magnitude spectrum
-        spec = torch.abs(stft_result)
+        #spec = torch.abs(stft_result)
         
         # Take only first 32 frequency bins
-        spec = spec[:32, :]
+        spec = stft_result[:32, :]
+        # Pad or truncate to exactly target_width
+        if spec.shape[1] < target_width:
+            # Pad with zeros
+            padding = torch.zeros(32, target_width - spec.shape[1],
+                                dtype=torch.complex64, device=device)
+            spec = torch.cat([spec, padding], dim=1)
+        elif spec.shape[1] > target_width:
+            # Truncate
+            spec = spec[:, :target_width]
+            
         
         # Resize time dimension to exactly target_width using interpolation
         if spec.shape[1] != target_width:
@@ -114,18 +128,19 @@ def get_STFT_spectra(tensor_data, target_width=None, device='cuda') -> torch.Ten
         spec_expanded = spec.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, 32, target_width)
         spec_final = F.interpolate(
             spec_expanded,
-            size=(64, 64),
+            size=(32, 32),
             mode='bilinear',
             align_corners=False
         )
         spec_final = spec_final[0, 0]  # Direct indexing instead of squeeze
         
         spectra_list.append(spec_final)
-    
+        '''
+        spectra_list.append(stft_result)
     # Stack all spectra along first dimension
     spectra = torch.stack(spectra_list, dim=0)
     
-    return spectra
+    return torch.log(spectra + 1e-8)
 
 def FFT_for_Period(x, k=2):
     # [B, T, C]
@@ -189,11 +204,263 @@ class TimesBlock(nn.Module):
         return res
 '''
 
-class Model(nn.Module):
+def positionalencoding2dv2(d_model, height, width):
     """
-    Paper link: https://openreview.net/pdf?id=ju_Uqw384Oq
+    :param d_model: dimension of the model
+    :param height: height of the positions
+    :param width: width of the positions
+    :return: d_model*height*width position matrix
     """
+    if d_model % 4 != 0:
+        raise ValueError("Cannot use sin/cos positional encoding with "
+                         "odd dimension (got dim={:d})".format(d_model))
+    pe = torch.zeros(d_model, height, width)
+    # Each dimension use half of d_model
+    d_model = int(d_model / 2)
+    div_term = torch.exp(torch.arange(0., d_model, 2) *
+                         -(math.log(10000.0) / d_model))
+    pos_w = torch.arange(0., width).unsqueeze(1)
+    pos_h = torch.arange(0., height).unsqueeze(1)
+    pe[0:d_model:2, :, :] = torch.sin(pos_w * div_term).transpose(0, 1).unsqueeze(1).repeat(1, height, 1)
+    pe[1:d_model:2, :, :] = torch.cos(pos_w * div_term).transpose(0, 1).unsqueeze(1).repeat(1, height, 1)
+    pe[d_model::2, :, :] = torch.sin(pos_h * div_term).transpose(0, 1).unsqueeze(2).repeat(1, 1, width)
+    pe[d_model + 1::2, :, :] = torch.cos(pos_h * div_term).transpose(0, 1).unsqueeze(2).repeat(1, 1, width)
 
+    return pe
+
+class PositionalEncoding2D(nn.Module):
+    """
+    Non-learnable 2D Sinusoidal Positional Encoding
+    Based on the extension of "Attention is All You Need" to 2D data.
+    
+    The encoding is calculated as:
+    PE(x,y,2i) = sin(x/10000^(4i/D))
+    PE(x,y,2i+1) = cos(x/10000^(4i/D))
+    PE(x,y,2j+D/2) = sin(y/10000^(4j/D))
+    PE(x,y,2j+1+D/2) = cos(y/10000^(4j/D))
+    
+    where (x,y) is the spatial position and D is the channel dimension.
+    """
+    def __init__(self, channels, height, width):
+        """
+        Args:
+            channels: Number of channels (must be divisible by 4)
+            height: Height of the spatial dimensions
+            width: Width of the spatial dimensions
+        """
+        super().__init__()
+        
+        if channels % 4 != 0:
+            raise ValueError(f"Cannot use 2D sinusoidal positional encoding with "
+                           f"channel dimension not divisible by 4 (got {channels})")
+        
+        self.channels = channels
+        self.height = height
+        self.width = width
+        
+        # Pre-compute the positional encoding (non-learnable)
+        pe = torch.zeros(channels, height, width)
+        
+        # Calculate position indices
+        y_position = torch.arange(0, height).unsqueeze(1).repeat(1, width)  # (H, W)
+        x_position = torch.arange(0, width).unsqueeze(0).repeat(height, 1)  # (H, W)
+        
+        # Calculate div_term for frequency scaling
+        div_term = torch.exp(torch.arange(0, channels // 2, 2).float() * 
+                            -(math.log(10000.0) / (height // 2)))
+        
+        # Encode x-position in first half of channels
+        pe[0::4, :, :] = torch.sin(x_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        pe[1::4, :, :] = torch.cos(x_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        
+        # Encode y-position in second half of channels
+        pe[2::4, :, :] = torch.sin(y_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        pe[3::4, :, :] = torch.cos(y_position.unsqueeze(0) * div_term.unsqueeze(1).unsqueeze(2))
+        
+        # Register as buffer (not a parameter, moves with model to device)
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, C, H, W)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape (B, C, H, W)
+        Returns:
+            x + positional_encoding of shape (B, C, H, W)
+        """
+        return x + self.pe
+    
+class Tsnet(nn.Module):
+    def __init__(self, c_in, d_model=512, out_channels=16, dropout=0.1, activation="relu"):
+        super().__init__()
+        
+        patch_size = 8
+        self.conv0 = nn.Conv2d(c_in, 64, kernel_size=patch_size, stride=patch_size, padding=0, bias=False)
+        self.maxpool = nn.Sequential(
+            nn.MaxPool2d(kernel_size=3, stride=1, padding=1),  # 局部擴散，保持大小
+            nn.GELU()
+        )
+        self.conv1 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(4,8), padding=(0, 2))
+        self.conv2 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(8,4), padding=(2, 0))
+        self.activation = F.relu if activation == "relu" else F.gelu
+        self.pe2d = PositionalEncoding2D(64, patch_size, patch_size)
+        
+    def forward(self, x): 
+        x = self.conv0(x)
+        x = self.pe2d(x)
+        conv48 = torch.flatten(self.activation(self.conv1(x)), start_dim=2)
+        conv84 = torch.flatten(self.activation(self.conv2(x)), start_dim=2)
+        x = self.maxpool(x)
+        
+        x_flat = torch.flatten(x, start_dim=2)
+
+        y = torch.cat([conv48, conv84, x_flat], dim=-1)
+
+        return y
+    
+class SpectralAmplifier(nn.Module):
+    def __init__(self, freq_bins=128, time_steps=96, learnable_bands=32):
+        super().__init__()
+        self.freq_bins = freq_bins
+        self.time_steps = time_steps
+        
+        # Learnable magnitude gains per frequency band
+        self.magnitude_gains = nn.Parameter(torch.ones(learnable_bands, 1))
+        
+        # Learnable phase shifts (for fine-tuning phase relationships)
+        self.phase_shifts = nn.Parameter(torch.zeros(learnable_bands, 1))
+        
+        # Softplus ensures positive gains
+        self.activation = nn.Softplus()
+        
+    def forward(self, x_complex):
+        # x_complex: [B, C, freq_bins, time_steps]
+        
+        # Convert to magnitude and phase
+        magnitude = torch.abs(x_complex)  # [B, C, freq_bins, time_steps]
+        phase = torch.angle(x_complex)
+        
+        # Create frequency-dependent gain map
+        freq_bins = magnitude.shape[2]
+        bins_per_band = freq_bins // self.magnitude_gains.shape[0]
+        
+        # Expand gains to match frequency bins
+        gains = torch.repeat_interleave(
+            self.activation(self.magnitude_gains), 
+            bins_per_band, 
+            dim=0
+        )[:freq_bins]  # [freq_bins, 1]
+        
+        phase_adj = torch.repeat_interleave(
+            self.phase_shifts,
+            bins_per_band,
+            dim=0
+        )[:freq_bins]
+        
+        # Apply amplification
+        amplified_mag = magnitude * gains.view(1, 1, -1, 1)
+        adjusted_phase = phase + phase_adj.view(1, 1, -1, 1)
+        
+        # Reconstruct complex signal
+        return amplified_mag * torch.exp(1j * adjusted_phase)
+        
+
+class TsnetImproved(nn.Module):
+    def __init__(self, c_in, d_model=512, dropout=0.1):
+        super().__init__()
+
+        # 1. Initial convolution
+        patch_size = 4
+        self.conv0 = nn.Conv2d(c_in, 64, kernel_size=patch_size, stride=patch_size, padding=0, bias=False)
+
+        self.conv0_real = nn.Conv2d(c_in, 32, kernel_size=patch_size, stride=patch_size, padding=0, bias=False)
+        self.conv0_imag = nn.Conv2d(c_in, 32, kernel_size=patch_size, stride=patch_size, padding=0, bias=False)
+
+        # 2. Amplitude-aware processing branches (all 64 channels)
+        self.amplitude_branch = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=1),  # Point-wise for amplitude
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),  # Spatial for patterns
+            nn.GroupNorm(8, 64),
+            nn.GELU()
+        )
+
+        self.frequency_branch = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=(1, 3), padding=(0, 1)),  # Frequency-wise
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Conv2d(64, 64, kernel_size=(3, 1), padding=(1, 0)),  # Time-wise
+            nn.GroupNorm(8, 64),
+            nn.GELU()
+        )
+
+        # 3. Combine branches and downsample (keep 64 channels)
+        self.downsample = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),  # 64 -> 64
+            nn.GroupNorm(8, 64),
+            nn.GELU()
+        )
+
+        # 4. Global average pooling
+        self.global_pool = nn.AdaptiveAvgPool2d((8, 8))  # Preserve some spatial info
+
+        # 5. Final projection head
+        self.projection_head = nn.Linear(64, d_model)
+
+        #self.pe2d = PositionalEncoding2D(64, 8, 8)
+
+        self.amplifier = SpectralAmplifier()
+
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, x):
+        # Input: [B, c_in, 64, 64] (from STFT spectrograms)
+        device = x.device
+
+        x = self.amplifier(x)
+
+        # Initial convolution: [B, c_in, 64, 64] -> [B, 64, 8, 8]
+        if torch.is_complex(x):
+            x_real = x.real  # [B, c_in, 32, target_width]
+            x_imag = x.imag  # [B, c_in, 32, target_width]
+
+            # Process real/imaginary through separate convolutions
+            feat_real = self.conv0_real(x_real)  # [B, 32, 8, 8]
+            feat_imag = self.conv0_imag(x_imag)  # [B, 32, 8, 8]
+
+            # Combine real and imaginary features
+            x = torch.cat([feat_real, feat_imag], dim=1)
+        else:
+            x = self.conv0(x)
+        #x = self.pe2d(x)
+        x = x + positionalencoding2dv2(64, x.shape[2], x.shape[3]).to(device)
+
+        # Multi-branch processing: [B, 64, 8, 8] -> [B, 64, 8, 8] each
+        amp_features = self.amplitude_branch(x)
+        freq_features = self.frequency_branch(x)
+
+        # Combine branches (element-wise addition): [B, 64, 8, 8]
+        combined = self.alpha*amp_features + (1.0-self.alpha)*freq_features
+
+        # Learnable downsampling: [B, 64, 8, 8] -> [B, 64, 8, 8]
+        x = x + self.downsample(combined)
+
+        # Global pooling: [B, 64, 8, 8] -> [B, 64, 8, 8] (same size, but smoothed)
+        #x = self.global_pool(x)
+
+        # Reshape for sequence processing: [B, 64, 8, 8] -> [B, 64, 64] -> [B, 64, 64]
+        x = x.flatten(start_dim=2)  # [B, 64, 64]
+        x = x.permute(0, 2, 1)      # [B, 64, 64] -> [B, 64, 64]
+
+        # Project each spatial location: [B, 64, 64] -> [B, 64, d_model]
+        B, N, C = x.shape  # B, 64, 64
+        x = x.reshape(B * N, C)     # [B*64, 64]
+        x = self.projection_head(x)  # [B*64, d_model]
+        x = x.reshape(B, N, -1)     # [B, 64, d_model]
+
+        return x  # Final shape: [B, 64, d_model]
+
+class Model(nn.Module):
     def __init__(self, configs):
         super(Model, self).__init__()
         self.configs = configs
@@ -231,24 +498,24 @@ class Model(nn.Module):
             self.projection = nn.Linear(
                 configs.d_model * configs.seq_len, configs.num_class)
             
-        self.my_resnet = models.resnet50(weights=None,progress=False)
-        self.my_resnet.conv1 = nn.Conv2d(configs.enc_in, 64, kernel_size=8, stride=8, padding=0, bias=False)
+        #self.my_resnet = models.resnet34(weights=None,progress=False)
+        #self.my_resnet.conv1 = nn.Conv2d(configs.enc_in, 64, kernel_size=8, stride=8, padding=0, bias=False)
 
+        '''
         self.my_resnet.maxpool = nn.Sequential(
             nn.MaxPool2d(kernel_size=7, stride=1, padding=1),  # 局部擴散，保持大小
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=False),
             nn.InstanceNorm2d(64),
             nn.GELU()
         )
-        #self.my_resnet.layer2[0].conv1.stride = (1, 1)
-        #self.my_resnet.layer2[0].downsample[0].stride = (1, 1)
-        #self.my_resnet.layer3[0].conv1.stride = (1, 1)
-        #self.my_resnet.layer3[0].downsample[0].stride = (1, 1)
-        #self.my_resnet.layer4[0].conv1.stride = (1, 1)
-        #self.my_resnet.layer4[0].downsample[0].stride = (1, 1)
-        self.my_resnet.avgpool = nn.AdaptiveMaxPool2d((7, 7))  # 去掉avgpool
-        self.my_resnet.fc = Rearrange('b (h w f c) -> b (f h w) c', h=7, w=7, c=512)
 
+        self.my_resnet.avgpool = nn.Sequential(
+            nn.AdaptiveMaxPool2d((8, 8)), 
+            PositionalEncoding2D(512, 8, 8)
+        )
+        self.my_resnet.fc = Rearrange('b (h w f c) -> b (f h w) c', h=8, w=8, c=512)
+        '''
+        '''
         self.decoder = Decoder(
                 [
                     DecoderLayer(
@@ -271,9 +538,24 @@ class Model(nn.Module):
                 #projection=nn.Linear(configs.d_model, configs.c_out, bias=True)
                 projection=None
             )
-        
+        '''
+
+        #encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8, batch_first=True)
+        #self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+
+        decoder_layer = nn.TransformerDecoderLayer(configs.d_model, nhead=8, batch_first=True)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=2)
+
         self.value_embedding = TokenEmbedding(c_in=self.c_in, d_model=self.d_model)
         self.position_embedding = PositionalEmbedding(d_model=self.d_model)
+
+        self.start_token = nn.Parameter(torch.zeros(1, 1, self.d_model))
+        nn.init.uniform_(self.start_token, -0.1, 0.1)
+
+        #self.tsnet = Tsnet(self.c_in, self.d_model, out_channels=16, dropout=configs.dropout, activation="relu")
+        self.tsnet = TsnetImproved(self.c_in, configs.d_model, configs.dropout)
+
+        #self.tsnet_linear = nn.Linear(114, self.d_model)
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # Normalization from Non-stationary Transformer
@@ -296,17 +578,28 @@ class Model(nn.Module):
         for item in x_enc:
             spectra = get_STFT_spectra(item, device=device)
             spectra_list.append(spectra)
-        
+
         # Stack into batch tensor
         spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, img_height, img_width)
-
-        enc_out = self.my_resnet(spectra_tensor)
-
-        # init dec_out starting tokens with 
-        dec_out = self.enc_embedding(x_enc, x_mark_enc)  # [B,T,C]
-        dec_out = self.predict_linear(dec_out.permute(0, 2, 1)).permute(0, 2, 1)
+        #print(f"spectra_tensor shape: {spectra_tensor.shape}")
+        enc_out = self.tsnet(spectra_tensor)
+        #print(f"enc_out shape after net: {enc_out.shape}")
         
-        dec_out = self.decoder(dec_out, enc_out, x_mask=None, cross_mask=None)
+        last_values = x_enc[:, -self.seq_len:, :]  # [B, context_len, D]
+        last_embedded = self.enc_embedding(last_values, None)
+
+        # OPTION A: Concatenate context to memory
+        memory = torch.cat([last_embedded, enc_out], dim=1)  # [B, context_len + spatial_features, d_model]
+        # init dec_out starting tokens with 
+        #print(f"x_enc_token shape after enc_embedding: {x_enc_tokens.shape}")
+        #dec_out = torch.cat([x_enc_tokens, self.start_token.expand(x_enc.shape[0], self.pred_len, -1)], dim=1)
+        #print(f"dec_out shape after adding start token: {dec_out.shape}")
+        dec_in = self.dec_embedding(x_dec, x_mark_dec)
+        
+        dec_out = self.decoder(dec_in, memory)
+        #print(f"dec_out shape after decoder: {dec_out.shape}")
+        
+        
 
         dec_out = self.projection(dec_out)
 
